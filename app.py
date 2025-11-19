@@ -13,9 +13,9 @@ from concurrent.futures import ThreadPoolExecutor
 #config
 WORDLIST_PATH = "wordlist.txt"
 MAX_WORKERS = 4
+ALLOWED_ALGOS = {"md5", "sha1", "sha256"}
 
 # models
-
 class CrackStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -55,17 +55,36 @@ class Cracker:
         hasher.update(plaintext.encode('utf-8'))
         return hasher.hexdigest()
     
-    def dictionary_attack(self, job: Job, wordlist: str = WORDLIST_PATH) -> str | None:
+    def _variant(self, plaintext: str) -> list[str]:
+        upper = plaintext.upper()
+        lower = plaintext.lower()
+        capitalized = plaintext.capitalize()
+        simple_l33t = ""
+
+        l33t_dict = {"a": "@", "e": "3", "g": '6', "i": "1", "o": "0", "s": "5"}
+        for char in plaintext:
+            if char in l33t_dict.key():
+                simple_l33t += l33t_dict.values()
+            else:
+                simple_l33t += char
+        
+        return [upper, lower, capitalized, simple_l33t]
+    
+    def dictionary_attack(self, job: Job, use_variant: bool = False, wordlist: str = WORDLIST_PATH) -> str | None:
         with open(wordlist, "r", encoding = "utf-8") as file:
             for line in file:
                 line = line.strip()
                 if not line:
                     continue
-                job.attempts += 1
-                hashed_line = self._compute_hash(line)
-                if hashed_line == self.target:
-                    return line
+                if not use_variant:
+                    job.attempts += 1
+                    hashed_line = self._compute_hash(line)
+                    if hashed_line == self.target:
+                        return line
+                else:
+                    pass 
         return None
+    
 
 class Manager:
     def __init__(self, max_workers: int = MAX_WORKERS):
@@ -101,7 +120,7 @@ class Manager:
 
 class CrackRequest(BaseModel):
     target: str
-    algorithm: str
+    algorithm: str = "md5"
 
 class CrackResponse(BaseModel):
     job_id: str
@@ -117,7 +136,6 @@ class JobStatusResponse(BaseModel):
 
 
 #api type shit
-
 app = FastAPI(title = "Hash Cracker V1")
 manager = Manager()
 
@@ -125,6 +143,8 @@ manager = Manager()
 def start_crack(request: CrackRequest) -> CrackResponse:
     if not request.target:
         raise HTTPException(status_code = 400, detail = "no hash value provided")
+    if request.algorithm.lower() not in ALLOWED_ALGOS:
+        raise HTTPException(status_code = 400, detail = "unsupported algorithm")
     
     job = manager.create_job(target = request.target, algorithm = request.algorithm)
     
@@ -135,7 +155,7 @@ def start_crack(request: CrackRequest) -> CrackResponse:
     
 
 @app.get("/status/{job_id}", response_model = JobStatusResponse)
-def get_status(job_id: str):
+def get_status(job_id: str) -> JobStatusResponse:
     job = manager.get_job(job_id)
     if job == None:
         raise HTTPException(status_code = 404, detail = "job not found")
