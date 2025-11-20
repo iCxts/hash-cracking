@@ -82,7 +82,12 @@ class Cracker:
                     if hashed_line == self.target:
                         return line
                 else:
-                    pass 
+                    for variat in line._variant:
+                        job.attempts += 1
+                        hashed_variant = self._compute_hash(hashed_variant)
+                        if hashed_variant == self.target:
+                            return hashed_variant
+
         return None
     
 
