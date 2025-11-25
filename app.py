@@ -1,179 +1,182 @@
-#importing shit
 from __future__ import annotations
 
-import hashlib
-import uuid
-from enum import Enum
-from typing import Dict
-
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from concurrent.futures import ThreadPoolExecutor
+import uvicorn
 
-#config
-WORDLIST_PATH = "wordlist.txt"
-MAX_WORKERS = 4
-ALLOWED_ALGOS = {"md5", "sha1", "sha256"}
+from config import ALLOWED_ALGOS
+from manager import Manager
+from models import CrackRequest, CrackResponse, JobStatusResponse, CrackStatus
+from mode import mode_chooser, terminal
+import os
 
-# models
-class CrackStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    FINISHED = "finished"
-    FAILED = "failed"
-
-class Job:
-    def __init__(
-            self,
-            id: str,
-            target: str,
-            algorithm: str,
-            status: CrackStatus = CrackStatus.PENDING,
-            result: str | None = None,
-            attempts: int = 0,
-            error: str | None = None
-    ) -> None:
-        self.id = id
-        self.target = target
-        self.algorithm = algorithm
-        self.status = status
-        self.result = result
-        self.attempts = attempts
-        self.error = error
-
-class Cracker:
-    def __init__(self, target: str, algorithm: str) -> None:
-        self.target = target.lower()
-        self.algorithm = algorithm.lower()
-    
-    def _compute_hash(self, plaintext: str) -> str:
-        try:
-            hasher = hashlib.new(self.algorithm)
-        except ValueError:
-            raise ValueError('Unsupported Algorithm')
-        
-        hasher.update(plaintext.encode('utf-8'))
-        return hasher.hexdigest()
-    
-    def _variant(self, plaintext: str) -> list[str]:
-        upper = plaintext.upper()
-        lower = plaintext.lower()
-        capitalized = plaintext.capitalize()
-        simple_l33t = ""
-
-        l33t_dict = {"a": "@", "e": "3", "g": '6', "i": "1", "o": "0", "s": "5"}
-        for char in plaintext:
-            if char in l33t_dict.key():
-                simple_l33t += l33t_dict.values()
-            else:
-                simple_l33t += char
-        
-        return [upper, lower, capitalized, simple_l33t]
-    
-    def dictionary_attack(self, job: Job, use_variant: bool = False, wordlist: str = WORDLIST_PATH) -> str | None:
-        with open(wordlist, "r", encoding = "utf-8") as file:
-            for line in file:
-                line = line.strip()
-                if not line:
-                    continue
-                if not use_variant:
-                    job.attempts += 1
-                    hashed_line = self._compute_hash(line)
-                    if hashed_line == self.target:
-                        return line
-                else:
-                    pass 
-        return None
-    
-
-class Manager:
-    def __init__(self, max_workers: int = MAX_WORKERS):
-        self.max_workers = max_workers
-        self.executor = ThreadPoolExecutor(max_workers = self.max_workers)
-        self.jobs: Dict[str, Job] = {}
-
-    def create_job(self, target: str, algorithm: str) -> Job:
-        job_id = str(uuid.uuid4())
-        job = Job(id = job_id, target = target, algorithm = algorithm)
-        self.jobs[job_id] = job
-        self.executor.submit(self._run_job, job_id)
-        return job
-    
-    def get_job(self, job_id: str) -> Job:
-        return self.jobs.get(job_id)
-
-    def _run_job(self, job_id: str) -> None:
-        job: Job = self.jobs.get(job_id)
-        if job == None:
-            return 
-        
-        job.status = CrackStatus.RUNNING
-        cracker = Cracker(job.target, job.algorithm)
-        try:
-            result = cracker.dictionary_attack(job)
-            job.result = result
-            job.status = CrackStatus.FINISHED
-        except Exception as exc:
-            job.status = CrackStatus.FAILED
-            job.result = None
-            job.error = str(exc)
-
-class CrackRequest(BaseModel):
-    target: str
-    algorithm: str = "md5"
-
-class CrackResponse(BaseModel):
-    job_id: str
-    status: CrackStatus
-    message: str
-
-class JobStatusResponse(BaseModel):
-    job_id: str
-    status: CrackStatus
-    result: str | None
-    attempts: int
-    error: str | None
-
-
-#api type shit
+# api type shit
 app = FastAPI(title = "Hash Cracker V1")
 manager = Manager()
+
+def clear_screen() -> None:
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        os.system("clear")
 
 @app.post("/crack", response_model = CrackResponse)
 def start_crack(request: CrackRequest) -> CrackResponse:
     if not request.target:
         raise HTTPException(status_code = 400, detail = "no hash value provided")
-    if request.algorithm.lower() not in ALLOWED_ALGOS:
+
+    algo = request.algorithm.lower()
+    if algo not in ALLOWED_ALGOS:
         raise HTTPException(status_code = 400, detail = "unsupported algorithm")
-    
-    job = manager.create_job(target = request.target, algorithm = request.algorithm)
-    
+
+    job = manager.create_job(target = request.target, algorithm = algo)
+
     return CrackResponse(
         job_id = job.id,
         status = job.status,
-        message = "job created")
-    
+        message = "job created",
+    )
 
-@app.get("/status/{job_id}", response_model = JobStatusResponse)
+
+@app.get("/status/{job_id}", response_model=JobStatusResponse)
 def get_status(job_id: str) -> JobStatusResponse:
     job = manager.get_job(job_id)
-    if job == None:
+    if job is None:
         raise HTTPException(status_code = 404, detail = "job not found")
-    
+
+    progress: float | None = None
+    if job.total_candidates is not None and job.total_candidates > 0:
+        progress = job.attempts / job.total_candidates * 100
+
     return JobStatusResponse(
         job_id = job.id,
         status = job.status,
         result = job.result,
-        attempts = job.attempts,
-        error = job.error
-        )
-    
+        progress = progress,
+        error = job.error,
+        started_at = job.started_at,
+        finished_at = job.finished_at,
+    )
+
+
+@app.post("/cancel/{job_id}", response_model = CrackResponse)
+def cancel_job(job_id: str) -> CrackResponse:
+    job = manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code = 404, detail = "job not found")
+
+    if job.status in (CrackStatus.FINISHED, CrackStatus.FAILED, CrackStatus.CANCELLED):
+        raise HTTPException(status_code = 400, detail = "job already completed")
+
+    job.status = CrackStatus.CANCELLED
+    return CrackResponse(
+        job_id = job.id,
+        status = job.status,
+        message = "job cancelled",
+    )
+
+# cli type shit
+def start_crack_cli(request: CrackRequest) -> CrackResponse | None:
+    if not request.target:
+        print("[!] No target provided")
+        return None
+
+    algo = request.algorithm.lower()
+    if algo not in ALLOWED_ALGOS:
+        print(f"[!] Unsupported algorithm: {algo}")
+        return None
+
+    job = manager.create_job(target = request.target, algorithm = algo)
+
+    return CrackResponse(
+        job_id = job.id,
+        status = job.status,
+        message = "job created",
+    )
+
+
 if __name__ == "__main__":
-    import uvicorn
+    mode = mode_chooser()
 
-    uvicorn.run("app:app", host = "0.0.0.0", port = 8000, reload = True)
+    if mode == "api":
+        uvicorn.run("app:app", host = "0.0.0.0", port = 8000, reload = True)
 
+    elif mode == "terminal":
+        clear_screen()
+        last_response: CrackResponse | None = None
 
+        while True:
+            print("=== Hash Cracker CLI ===")
+            target, algorithm = terminal()
 
-        
+            if not target or not algorithm:
+                print("[!] Invalid input")
+                input("[Enter] to continue...")
+                clear_screen()
+                continue
 
+            request = CrackRequest(target = target, algorithm = algorithm)
+            response = start_crack_cli(request)
+
+            if response is None:
+                input("[Enter] to continue...")
+                clear_screen()
+                continue
+
+            last_response = response
+            print(f"[+] Job created. Job ID : {response.job_id}")
+
+            while True:
+                print()
+                action = input(
+                    "[S]tatus [N]ew [Q]uit [L]ist > "
+                ).strip().lower()
+
+                if action == "q":
+                    clear_screen()
+                    raise SystemExit(0)
+
+                elif action == "n":
+                    print(f"[*] Job {last_response.job_id} running in background")
+                    input("[Enter] to create new job...")
+                    clear_screen()
+                    break 
+
+                elif action == "s":
+                    job_id = input("[?] Job ID (blank = last) > ").strip()
+                    if not job_id:
+                        if last_response is None:
+                            print("[!] No last job to use")
+                            continue
+                        job_id = last_response.job_id
+
+                    try:
+                        clear_screen()
+                        status = get_status(job_id)
+                    except HTTPException as exc:
+                        print(f"[!] Error: {exc.detail}")
+                        continue
+
+                    print("=== Job Status ===")
+                    print(f"ID       : {status.job_id}")
+                    print(f"Status   : {status.status.value}")
+                    print(f"Result   : {status.result}")
+                    print(f"Progress : {status.progress}")
+                    print()
+                    input("[Enter] to go back...")
+
+                elif action == "l":
+                    clear_screen()
+                    print("=== Jobs ===")
+                    if not manager.jobs:
+                        print("[*] No jobs yet")
+                    else:
+                        for jid, job in manager.jobs.items():
+                            print(
+                                f"{jid}  status: {job.status.value}  "
+                                f"attempts: {job.attempts}  result: {job.result}"
+                            )
+                    print()
+                    input("[Enter] to go back...")
+
+                else:
+                    print("[!] Unknown option.")

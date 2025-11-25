@@ -1,2 +1,6 @@
 curl -X POST "http://127.0.0.1:8000/crack" -H "Content-Type: application/json" -d "{\"target\":\"5f4dcc3b5aa765d61d8327deb882cf99\",\"algorithm\":\"md5\"}"
 curl http://127.0.0.1:8000/status/{job_id}
+
+
+curl -X POST "http://127.0.0.1:8000/crack" -H "Content-Type: application/json" -d "{\"target\":\"3cc26ed6466f1f1185821aa06df7fd7b5ede26b5\",\"algorithm\":\"sha1\"}"
+2eb8386867fc996e7d88087b4bb70bef
